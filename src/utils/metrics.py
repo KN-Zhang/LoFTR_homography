@@ -191,3 +191,84 @@ def aggregate_metrics(metrics, epi_err_thr=5e-4):
     precs = epidist_prec(np.array(metrics['epi_errs'], dtype=object)[unq_ids], dist_thresholds, True)  # (prec@err_thr)
 
     return {**aucs, **precs}
+
+
+from kornia.geometry.linalg import transform_points
+from kornia.geometry.homography import oneway_transfer_error
+def compute_MA(data):
+    device = data['image0'].device
+    bs = data['image0'].shape[0]
+    hi, wi = data['hw0_i']
+    H_s2t = data['H_s2t'] ## b 3 3
+    
+    ## 1 4 2
+    four_corners_1 = torch.tensor([[0, 0], [wi-1, 0], [wi-1, hi-1], [0, hi-1]]).to(device).float().unsqueeze(0)
+    
+    m_bids = data['m_bids']
+    pts0 = data['mkpts0_f']
+    pts1 = data['mkpts1_f']
+    conf = data['mconf']
+    
+    ACE = []
+    num_matches = []
+    
+    for b_id in range(bs):
+        b_mask = m_bids == b_id
+        num_matches.append(b_mask.sum().cpu().numpy().item())
+        kpts0 = pts0[b_mask]
+        kpts1 = pts1[b_mask]
+        weight = conf[b_mask]
+        H_s2t_per_sample = H_s2t[b_id].unsqueeze(0) ## 1 3 3
+        gt_points10 = transform_points(H_s2t_per_sample, four_corners_1)
+        try:
+            H_pred, inliers = cv2.findHomography(
+                kpts0.cpu().numpy(),
+                kpts1.cpu().numpy(),
+                method = cv2.RANSAC,
+                confidence = 0.99999,
+                ransacReprojThreshold = 3* min(wi, hi) / int(data['original_h'][0]),
+            )
+        except:
+            H_pred = None
+        if H_pred is None:
+            H_pred = np.zeros((3, 3))
+            H_pred[2, 2] = 1.0
+        H_pred = torch.from_numpy(H_pred).to(kpts0.device).float().unsqueeze(0)
+        error = oneway_transfer_error(four_corners_1, gt_points10, H_pred, squared=False).mean().cpu().numpy() / (min(wi, hi) / int(data['original_h'][0]))
+        if error>20*int(data['original_h'][0])/128:
+            error = 20*int(data['original_h'][0])/128
+            ACE.append(error)
+        else:
+            ACE.append(error.item())
+
+    data.update({'ACE': ACE,
+                 'num_matches': num_matches,})
+
+
+def auc(errors, thresholds):
+    sort_idx = np.argsort(errors)
+    errors = np.array(errors.copy())[sort_idx]
+    recall = (np.arange(len(errors)) + 1) / len(errors)
+    errors = np.r_[0., errors]
+    recall = np.r_[0., recall]
+    aucs = []
+    for t in thresholds:
+        last_index = np.searchsorted(errors, t)
+        r = np.r_[recall[:last_index], recall[last_index-1]]
+        e = np.r_[errors[:last_index], t]
+        aucs.append(np.trapz(r, x=e)/t)
+    return aucs
+
+def aggregate_metrics_my(metrics):
+    """ Aggregate metrics for the whole dataset:
+    (This method should be called once per dataset)
+    1. AUC of the pose error (angular) at the threshold [5, 10, 20]
+    2. Mean matching precision at the threshold 5e-4(ScanNet), 1e-4(MegaDepth)
+    """
+    ACE = metrics['ACE']
+    thresholds = [3, 5, 10, 20]
+    aucs = auc(ACE, thresholds)
+    results = {f'auc@{t}': v for t, v in zip(thresholds, aucs)}
+    results.update({"ace": np.mean(ACE)})
+
+    return {**results}

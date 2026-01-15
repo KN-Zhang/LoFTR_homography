@@ -25,3 +25,9 @@ tools/draw_QccDayNights.py
 scripts/slurm/
 scripts/sbatch_submit.sh
 src/utils/client.py
+
+checkpoints/homo-ds-vis_ir_drone-448-bs=6
+checkpoints/homo-ds-vis_ir_drone-448-bs=20
+checkpoints/homo-ds-vis_ir_drone-448-bs=24
+wandb/
+lightning_logs/
